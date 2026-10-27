@@ -19,7 +19,7 @@ MAX_LEVEL = 3
 
 
 class World:
-    def __init__(self, width: int = 80, height: int = 60, seed: int | None = None):
+    def __init__(self, width: int = 160, height: int = 110, seed: int | None = None):
         self.width, self.height = width, height
         self.water = np.zeros((height, width), dtype=bool)
         self.road = np.zeros((height, width), dtype=bool)
@@ -33,7 +33,8 @@ class World:
 
     # --- editing -----------------------------------------------------------
     def build_road(self, x: int, y: int) -> bool:
-        if not self.in_bounds(x, y) or self.water[y, x]:
+        # roads may cross water (bridges)
+        if not self.in_bounds(x, y):
             return False
         self.zone[y, x] = Zone.NONE
         self.level[y, x] = 0
@@ -48,6 +49,16 @@ class World:
             # parks are fully "built"; other zones start as empty lots
             self.level[y, x] = 1 if zone == Zone.PARK else 0
         return True
+
+    def set_zone_rect(self, x0: int, y0: int, x1: int, y1: int, zone: Zone) -> None:
+        for y in range(max(0, min(y0, y1)), min(self.height, max(y0, y1) + 1)):
+            for x in range(max(0, min(x0, x1)), min(self.width, max(x0, x1) + 1)):
+                self.set_zone(x, y, zone)
+
+    def bulldoze_rect(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        for y in range(max(0, min(y0, y1)), min(self.height, max(y0, y1) + 1)):
+            for x in range(max(0, min(x0, x1)), min(self.width, max(x0, x1) + 1)):
+                self.bulldoze(x, y)
 
     def bulldoze(self, x: int, y: int) -> bool:
         if not self.in_bounds(x, y):
@@ -80,11 +91,14 @@ class World:
         h, w = self.height, self.width
         self.water[:] = False
         x = w * self.rng.uniform(0.3, 0.7)
+        half = max(1, w // 40)
         for y in range(h):
-            x += self.rng.normal(0, 0.8)
-            x = float(np.clip(x, 4, w - 5))
-            self.water[y, int(x) - 1 : int(x) + 1] = True
-        cx, cy, r = self.rng.integers(10, w - 10), self.rng.integers(8, h - 8), self.rng.integers(3, 6)
+            x += self.rng.normal(0, 1.2)
+            x = float(np.clip(x, half + 4, w - half - 5))
+            self.water[y, int(x) - half : int(x) + half + 1] = True
+        r = int(self.rng.integers(max(3, h // 14), max(4, h // 8)))
+        cx = int(self.rng.integers(r + 2, max(r + 3, w - r - 2)))
+        cy = int(self.rng.integers(r + 2, max(r + 3, h - r - 2)))
         yy, xx = np.ogrid[:h, :w]
         self.water |= (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
 
@@ -96,7 +110,8 @@ class World:
                 yield nx, ny
 
     def population(self) -> int:
-        return int(self.level[self.zone == Zone.RESIDENTIAL].sum()) * 5
+        from .sim import HOME_PER_LEVEL
+        return int(self.level[self.zone == Zone.RESIDENTIAL].sum() * HOME_PER_LEVEL)
 
     # --- persistence -------------------------------------------------------
     def save(self, path: str) -> None:

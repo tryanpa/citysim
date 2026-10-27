@@ -15,27 +15,30 @@ TOOLS = [  # key, label, action
 SPEEDS = [0, 1, 2, 4, 8]  # sim ticks per second
 
 
-def apply_tool(world: World, tool, x: int, y: int) -> None:
-    if tool == "road":
-        world.build_road(x, y)
-    elif tool == "bulldoze":
-        world.bulldoze(x, y)
+def apply_rect(world: World, tool, a: tuple[int, int], b: tuple[int, int]) -> None:
+    if tool == "bulldoze":
+        world.bulldoze_rect(*a, *b)
     else:
-        world.set_zone(x, y, tool)
+        world.set_zone_rect(*a, *b, tool)
 
 
-def run(world: World, path: str = "city.json", tile: int = 12) -> None:
+def run(world: World, path: str = "city.json", tile: int = 6) -> None:
     pygame.init()
     sim = Simulation(world)
     sim.step()
-    hud_h = 44
+    hud_h = 62
     screen = pygame.display.set_mode((world.width * tile, world.height * tile + hud_h))
     pygame.display.set_caption("citysim")
     font = pygame.font.SysFont("monospace", 14)
     clock = pygame.time.Clock()
     tool, tool_name, overlay, speed_i, acc = "road", "Road", "none", 2, 0.0
-    last = None  # last painted cell, for continuous drag lines
+    last = None   # last painted cell, so road drags have no gaps
+    start = None  # corner of the zone / bulldoze rectangle being dragged
     painting = False
+
+    def cell_at(pos):
+        c = (pos[0] // tile, pos[1] // tile)
+        return c if pos[1] < world.height * tile and world.in_bounds(*c) else None
     running = True
     while running:
         dt = clock.tick(60) / 1000
@@ -70,15 +73,17 @@ def run(world: World, path: str = "city.json", tile: int = 12) -> None:
                 elif e.key == pygame.K_ESCAPE:
                     running = False
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-                painting, last = True, None
+                painting, last, start = True, None, cell_at(e.pos)
             elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
-                painting = False
-        if painting:
-            mx, my = pygame.mouse.get_pos()
-            cell = (mx // tile, my // tile)
-            if my < world.height * tile and world.in_bounds(*cell):
+                end = cell_at(e.pos)
+                if painting and tool != "road" and start and end:
+                    apply_rect(world, tool, start, end)
+                painting, start = False, None
+        if painting and tool == "road":
+            cell = cell_at(pygame.mouse.get_pos())
+            if cell:
                 for x, y in world.line(*(last or cell), *cell):
-                    apply_tool(world, tool, x, y)
+                    world.build_road(x, y)
                 last = cell
         if SPEEDS[speed_i]:
             acc += dt * SPEEDS[speed_i]
@@ -88,11 +93,20 @@ def run(world: World, path: str = "city.json", tile: int = 12) -> None:
         surf = pygame.surfarray.make_surface(render(sim, overlay, tile).swapaxes(0, 1))
         screen.fill((25, 25, 28))
         screen.blit(surf, (0, 0))
+        if painting and tool != "road" and start:
+            cur = cell_at(pygame.mouse.get_pos()) or start
+            x0, x1 = sorted((start[0], cur[0]))
+            y0, y1 = sorted((start[1], cur[1]))
+            pygame.draw.rect(screen, (255, 255, 255),
+                             (x0 * tile, y0 * tile, (x1 - x0 + 1) * tile, (y1 - y0 + 1) * tile), 2)
+            label = font.render(f"{x1 - x0 + 1} x {y1 - y0 + 1}", True, (255, 255, 255), (0, 0, 0))
+            screen.blit(label, (x0 * tile, max(0, y0 * tile - 18)))
         s = sim.stats
         lines = [
             f"tool: {tool_name}   overlay: {overlay}   speed: {SPEEDS[speed_i]}x   tick {world.tick}",
             f"pop {s.get('population', 0)}  jobs {s.get('jobs', 0)}  unserved {int(s.get('unserved', 0))}"
-            f"  | 1-6 tools  O overlay  SPACE pause  +/- speed  . step  S save  L load",
+            f"  | 1 road (drag)  2-6 zones/bulldoze (drag a rectangle)",
+            "O overlay  SPACE pause  +/- speed  . step  S save  L load   (1 cell = 10 m)",
         ]
         for i, t in enumerate(lines):
             screen.blit(font.render(t, True, (230, 230, 230)), (6, world.height * tile + 4 + i * 18))

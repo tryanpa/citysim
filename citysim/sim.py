@@ -1,5 +1,8 @@
 """Simulation rules: pollution, land value, road traffic and building growth.
 
+Scale: one cell is roughly 10 m, so a road is 1 cell wide and a city block /
+zone is typically around 10x10 cells. Buildings grow in 2x2 lots.
+
 There is deliberately no money, score or goals: the sim only reacts to how
 the city is laid out, and exposes the results as overlay maps.
 """
@@ -11,14 +14,24 @@ import numpy as np
 
 from .world import MAX_LEVEL, World, Zone
 
-HOME_PER_LEVEL, JOB_COMMERCIAL, JOB_INDUSTRIAL = 5, 3, 4
+HOME_PER_LEVEL = 2.0     # residents per cell per level
+JOB_COMMERCIAL = 1.0     # jobs per cell per level
+JOB_INDUSTRIAL = 1.5
+ROAD_REACH = 5           # a lot can use a road up to this many cells away
+ROAD_CAPACITY = 300.0    # commuters per road cell before it counts as congested
+LOT = 2                  # buildings grow in LOT x LOT lots
 
 
-def blur(a: np.ndarray, passes: int = 1) -> np.ndarray:
-    """Cheap diffusion: average of a cell and its 4 neighbours (edges clamp)."""
+def box_blur(a: np.ndarray, r: int, passes: int = 2) -> np.ndarray:
+    """Smooth with a (2r+1) box filter, repeated; edges clamp."""
+    h, w = a.shape
+    k = 2 * r + 1
     for _ in range(passes):
-        p = np.pad(a, 1, mode="edge")
-        a = (p[1:-1, 1:-1] * 2 + p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) / 6
+        p = np.pad(a, r, mode="edge")
+        c = np.vstack([np.zeros((1, p.shape[1])), np.cumsum(p, axis=0)])
+        a = (c[k:] - c[:-k]) / k
+        c = np.hstack([np.zeros((h, 1)), np.cumsum(a, axis=1)])
+        a = (c[:, k:] - c[:, :-k]) / k
     return a
 
 
@@ -30,38 +43,79 @@ class Simulation:
         self.land_value = np.zeros(shape)
         self.traffic = np.zeros(shape)
         self.desirability = np.zeros(shape)
+        self.job_access = np.zeros(shape, dtype=bool)
         self.stats: dict[str, float] = {}
+        self._reach_key: tuple | None = None
+        self.entry = np.full(shape, -1, dtype=np.int64)  # flat index of nearest road cell
 
-    # --- helpers -------------------------------------------------------------
-    def _road_access(self) -> np.ndarray:
-        r = self.world.road
-        a = np.zeros_like(r)
-        a[1:] |= r[:-1]; a[:-1] |= r[1:]; a[:, 1:] |= r[:, :-1]; a[:, :-1] |= r[:, 1:]
-        return a
-
-    def _components(self) -> np.ndarray:
-        """Label connected road networks (0 = no road)."""
+    # --- road reach (cached; only changes when roads/water are edited) ------------
+    def _update_reach(self) -> None:
         w = self.world
-        label = np.zeros((w.height, w.width), dtype=np.int32)
-        n = 0
-        for y, x in zip(*np.nonzero(w.road)):
-            if label[y, x]:
+        key = (w.road.tobytes(), w.water.tobytes())
+        if key == self._reach_key:
+            return
+        self._reach_key = key
+        h, wd = w.height, w.width
+        dist = np.full(h * wd, -1, dtype=np.int16)
+        src = np.full(h * wd, -1, dtype=np.int64)
+        road, water = w.road.ravel(), w.water.ravel()
+        start = np.flatnonzero(road)
+        dist[start], src[start] = 0, start
+        q = deque(start.tolist())
+        while q:
+            i = q.popleft()
+            if dist[i] >= ROAD_REACH:
                 continue
-            n += 1
-            label[y, x] = n
-            q = deque([(x, y)])
-            while q:
-                cx, cy = q.popleft()
-                for nx, ny in w.neighbors4(cx, cy):
-                    if w.road[ny, nx] and not label[ny, nx]:
-                        label[ny, nx] = n
-                        q.append((nx, ny))
-        return label
-
-    def _adjacent_roads(self, x: int, y: int):
-        return [(nx, ny) for nx, ny in self.world.neighbors4(x, y) if self.world.road[ny, nx]]
+            y, x = divmod(i, wd)
+            for j, ok in ((i - wd, y > 0), (i + wd, y < h - 1), (i - 1, x > 0), (i + 1, x < wd - 1)):
+                if ok and dist[j] < 0 and not water[j]:
+                    dist[j], src[j] = dist[i] + 1, src[i]
+                    q.append(j)
+        entry = np.where(dist >= 0, src, -1).reshape(h, wd)
+        entry[w.road] = -1  # road cells themselves don't hold buildings
+        self.entry = entry
 
     # --- layers --------------------------------------------------------------
+    def _update_traffic(self) -> None:
+        """Send every home's commuters to the nearest job along the road graph."""
+        w = self.world
+        h, wd = w.height, w.width
+        lvl = w.level.astype(float)
+        jobs = np.where(w.zone == Zone.COMMERCIAL, lvl * JOB_COMMERCIAL, 0) \
+            + np.where(w.zone == Zone.INDUSTRIAL, lvl * JOB_INDUSTRIAL, 0)
+        homes = np.where(w.zone == Zone.RESIDENTIAL, lvl * HOME_PER_LEVEL, 0)
+        has_entry = self.entry >= 0
+        sources = np.unique(self.entry[(jobs > 0) & has_entry])
+
+        # multi-source BFS over roads; parent points toward a job
+        road = w.road.ravel()
+        parent = np.full(h * wd, -1, dtype=np.int64)
+        seen = np.zeros(h * wd, dtype=bool)
+        seen[sources] = True
+        order = sources.tolist()
+        q = deque(order)
+        while q:
+            i = q.popleft()
+            y, x = divmod(i, wd)
+            for j, ok in ((i - wd, y > 0), (i + wd, y < h - 1), (i - 1, x > 0), (i + 1, x < wd - 1)):
+                if ok and road[j] and not seen[j]:
+                    seen[j], parent[j] = True, i
+                    q.append(j)
+                    order.append(j)
+
+        hm = (homes > 0) & has_entry
+        he, hv = self.entry[hm], homes[hm]
+        ok = seen[he]
+        load = np.bincount(he[ok], weights=hv[ok], minlength=h * wd)
+        for i in reversed(order):  # accumulate flow down the BFS tree toward the jobs
+            if parent[i] >= 0:
+                load[parent[i]] += load[i]
+        self.traffic = load.reshape(h, wd)
+        self.job_access = np.zeros(h * wd, dtype=bool).reshape(h, wd)
+        self.job_access[hm] = ok
+        self.stats["commuters"] = float(hv[ok].sum())
+        self.stats["unserved"] = float(hv[~ok].sum() + homes[(homes > 0) & ~has_entry].sum())
+
     def _update_environment(self) -> None:
         w = self.world
         lvl = w.level.astype(float)
@@ -70,64 +124,36 @@ class Simulation:
         homes = np.where(w.zone == Zone.RESIDENTIAL, lvl, 0)
         parks = (w.zone == Zone.PARK).astype(float)
 
-        road_smog = blur(self.traffic / (self.traffic.max() + 1e-9), 2) * 0.4
-        self.pollution = np.clip(blur(industry, 4) * 3.0 + road_smog - blur(parks, 3) * 1.5, 0, 1)
-
-        water_bonus = blur(w.water.astype(float), 3) * 0.4
+        road_smog = box_blur(self.traffic / ROAD_CAPACITY, 3) * 0.8
+        self.pollution = np.clip(
+            box_blur(industry, 5) * 0.5 + road_smog - box_blur(parks, 4) * 0.5, 0, 1)
         self.land_value = np.clip(
-            0.35 + blur(parks, 3) * 1.6 + blur(commerce, 3) * 0.5 + blur(homes, 3) * 0.15
-            + water_bonus - self.pollution * 0.9, 0, 1)
-
-    def _update_traffic(self, comp: np.ndarray) -> None:
-        """Send every home's commuters to its nearest job along the road graph."""
-        w = self.world
-        self.traffic[:] = 0
-        job_tiles = {}
-        for zone, per in ((Zone.COMMERCIAL, JOB_COMMERCIAL), (Zone.INDUSTRIAL, JOB_INDUSTRIAL)):
-            for y, x in zip(*np.nonzero((w.zone == zone) & (w.level > 0))):
-                for r in self._adjacent_roads(x, y):
-                    job_tiles[r] = job_tiles.get(r, 0) + per * int(w.level[y, x])
-        # multi-source BFS from job-adjacent roads; parent points toward a job
-        parent = {r: None for r in job_tiles}
-        q = deque(parent)
-        while q:
-            cx, cy = q.popleft()
-            for nx, ny in w.neighbors4(cx, cy):
-                if w.road[ny, nx] and (nx, ny) not in parent:
-                    parent[(nx, ny)] = (cx, cy)
-                    q.append((nx, ny))
-        commuters = unserved = 0
-        for y, x in zip(*np.nonzero((w.zone == Zone.RESIDENTIAL) & (w.level > 0))):
-            n = HOME_PER_LEVEL * int(w.level[y, x])
-            entry = next((r for r in self._adjacent_roads(x, y) if r in parent), None)
-            if entry is None:
-                unserved += n
-                continue
-            commuters += n
-            cur = entry
-            while cur is not None:
-                self.traffic[cur[1], cur[0]] += n
-                cur = parent[cur]
-        self.stats["commuters"] = commuters
-        self.stats["unserved"] = unserved
+            0.35 + box_blur(parks, 5) * 0.6 + box_blur(commerce, 5) * 0.15
+            + box_blur(homes, 5) * 0.05 + box_blur(w.water.astype(float), 5) * 0.3
+            - self.pollution * 0.9, 0, 1)
 
     # --- growth --------------------------------------------------------------
-    def _update_growth(self, comp: np.ndarray) -> None:
+    def _lot_roll(self) -> np.ndarray:
+        """Random numbers shared across each LOT x LOT lot so lots grow together."""
         w = self.world
-        access = self._road_access()
-        homes = np.where(w.zone == Zone.RESIDENTIAL, w.level, 0).sum()
-        jobs_c = np.where(w.zone == Zone.COMMERCIAL, w.level, 0).sum() * JOB_COMMERCIAL
-        jobs_i = np.where(w.zone == Zone.INDUSTRIAL, w.level, 0).sum() * JOB_INDUSTRIAL
-        pop = homes * HOME_PER_LEVEL
-        # demand: each sector wants the others to exist; start-up bias keeps the first lots alive
+        r = w.rng.random((w.height // LOT + 1, w.width // LOT + 1))
+        return np.kron(r, np.ones((LOT, LOT)))[: w.height, : w.width]
+
+    def _update_growth(self) -> None:
+        w = self.world
+        has_entry = self.entry >= 0
+        lvl = w.level
+        pop = float(np.where(w.zone == Zone.RESIDENTIAL, lvl, 0).sum() * HOME_PER_LEVEL)
+        jobs_c = float(np.where(w.zone == Zone.COMMERCIAL, lvl, 0).sum() * JOB_COMMERCIAL)
+        jobs_i = float(np.where(w.zone == Zone.INDUSTRIAL, lvl, 0).sum() * JOB_INDUSTRIAL)
+        # each sector wants the others to exist; start-up bias lets the first lots appear
         demand = {
-            Zone.RESIDENTIAL: np.clip(((jobs_c + jobs_i + 8) - pop) / 20, -1, 1),
-            Zone.COMMERCIAL: np.clip((pop * 0.5 + 4 - jobs_c) / 20, -1, 1),
-            Zone.INDUSTRIAL: np.clip((pop * 0.4 + 4 - jobs_i) / 20, -1, 1),
+            Zone.RESIDENTIAL: np.clip(((jobs_c + jobs_i) * 1.1 + 60 - pop) / 200, -1, 1),
+            Zone.COMMERCIAL: np.clip((pop * 0.55 + 20 - jobs_c) / 100, -1, 1),
+            Zone.INDUSTRIAL: np.clip((pop * 0.55 + 20 - jobs_i) / 100, -1, 1),
         }
-        congestion = np.clip(blur(self.traffic, 2) / 60.0, 0, 1)
-        d = np.zeros_like(self.land_value)
-        d[:] = np.nan
+        congestion = np.clip(box_blur(self.traffic / ROAD_CAPACITY, 3) * 3, 0, 1)
+        d = np.full(self.land_value.shape, np.nan)
         for zone, dem in demand.items():
             m = w.zone == zone
             if zone == Zone.INDUSTRIAL:  # industry doesn't mind pollution, dislikes expensive land
@@ -135,29 +161,33 @@ class Simulation:
             elif zone == Zone.RESIDENTIAL:
                 score = self.land_value * 0.7 + dem * 0.5 - self.pollution * 0.4 - congestion * 0.3
             else:
-                score = self.land_value * 0.4 + dem * 0.5 + congestion * 0.0 - congestion * 0.2
+                score = self.land_value * 0.4 + dem * 0.5 - congestion * 0.2
             d[m] = score[m]
         self.desirability = d
-        buildable = access & ~np.isnan(d) & (w.zone != Zone.PARK)
-        roll = w.rng.random(d.shape)
-        grow = buildable & (d > 0.3) & (roll < 0.3) & (w.level < MAX_LEVEL)
-        shrink = (w.zone > 0) & (w.zone != Zone.PARK) & (w.level > 0) & (
-            ~access | (np.nan_to_num(d, nan=1) < 0.05)) & (roll < 0.08)
+
+        buildable = has_entry & ~np.isnan(d)
+        if jobs_c + jobs_i > 0:  # homes only grow where commuters can reach a job
+            buildable &= (w.zone != Zone.RESIDENTIAL) | self.job_access
+        roll = self._lot_roll()
+        grow = buildable & (d > 0.3) & (roll < 0.15) & (lvl < MAX_LEVEL)
+        built = (w.zone > 0) & (w.zone != Zone.PARK) & (lvl > 0)
+        shrink = built & (~has_entry | (np.nan_to_num(d, nan=1) < 0.05)) & (roll < 0.08)
         w.level[grow] += 1
         w.level[shrink] -= 1
 
     # --- main entry ----------------------------------------------------------
     def step(self) -> None:
-        comp = self._components()
-        self._update_traffic(comp)
+        self._update_reach()
+        self._update_traffic()
         self._update_environment()
-        self._update_growth(comp)
-        self.world.tick += 1
+        self._update_growth()
         w = self.world
+        w.tick += 1
+        lvl = w.level.astype(float)
         self.stats.update(
             tick=w.tick, population=w.population(),
-            jobs=int(np.where(w.zone == Zone.COMMERCIAL, w.level, 0).sum() * JOB_COMMERCIAL
-                     + np.where(w.zone == Zone.INDUSTRIAL, w.level, 0).sum() * JOB_INDUSTRIAL),
+            jobs=int(np.where(w.zone == Zone.COMMERCIAL, lvl * JOB_COMMERCIAL, 0).sum()
+                     + np.where(w.zone == Zone.INDUSTRIAL, lvl * JOB_INDUSTRIAL, 0).sum()),
             avg_land_value=float(self.land_value.mean()),
             avg_pollution=float(self.pollution.mean()),
             peak_traffic=float(self.traffic.max()),

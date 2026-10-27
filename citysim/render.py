@@ -37,8 +37,8 @@ def tile_colors(sim: Simulation, overlay: str = "none") -> np.ndarray:
         # empty lots are drawn pale; built-up levels get progressively darker
         img[m] = np.clip(np.array(c) * (1.3 - 0.3 * w.level[m])[:, None], 0, 255)
         img[m & (w.level == 0)] = np.array(c) * 0.5 + np.array(GROUND) * 0.5
-    img[w.road] = ROAD
     img[w.water] = WATER
+    img[w.road] = ROAD
     if overlay != "none":
         field = {
             "land value": sim.land_value, "pollution": sim.pollution,
@@ -46,12 +46,12 @@ def tile_colors(sim: Simulation, overlay: str = "none") -> np.ndarray:
             "desirability": sim.desirability,
         }[overlay]
         heat = _heat(field)
-        mask = w.road if overlay == "traffic" else ~w.water
+        mask = w.road if overlay == "traffic" else ~w.water | w.road
         img[mask] = img[mask] * 0.35 + heat[mask] * 0.65
     return img.astype(np.uint8)
 
 
-def render(sim: Simulation, overlay: str = "none", tile: int = 10, grid: bool = True) -> np.ndarray:
+def render(sim: Simulation, overlay: str = "none", tile: int = 6, grid: bool = True) -> np.ndarray:
     px = np.kron(tile_colors(sim, overlay), np.ones((tile, tile, 1), dtype=np.uint8))
     if grid and tile >= 8:
         px[::tile] = (px[::tile] * 0.85).astype(np.uint8)
