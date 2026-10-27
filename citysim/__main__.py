@@ -35,4 +35,5 @@ def main() -> None:
         run(world)
 
 
-main()
+if __name__ == "__main__":
+    main()
