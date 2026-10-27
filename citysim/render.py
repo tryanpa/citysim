@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import terrain
 from .sim import Simulation
 from .world import Zone
 
 OVERLAYS = ["none", "land value", "pollution", "traffic", "desirability"]
 
-WATER, GROUND, ROAD = (60, 120, 190), (120, 160, 95), (70, 70, 75)
+ROAD = (70, 70, 75)
+BIOME_COLORS = np.array(terrain.PALETTE, dtype=float)
 ZONE_BASE = {
-    Zone.RESIDENTIAL: (70, 170, 90), Zone.COMMERCIAL: (70, 110, 210),
+    Zone.RESIDENTIAL: (110, 225, 150), Zone.COMMERCIAL: (70, 110, 210),
     Zone.INDUSTRIAL: (210, 180, 60), Zone.PARK: (40, 130, 60),
 }
 
@@ -27,8 +29,8 @@ def _heat(v: np.ndarray) -> np.ndarray:
 
 def tile_colors(sim: Simulation, overlay: str = "none") -> np.ndarray:
     w = sim.world
-    img = np.empty((w.height, w.width, 3), dtype=float)
-    img[:] = GROUND
+    img = BIOME_COLORS[w.biome]  # flat terrain colours straight from the palette
+    ground = img.copy()
     for z, c in ZONE_BASE.items():
         m = w.zone == z
         if z == Zone.PARK:
@@ -36,8 +38,7 @@ def tile_colors(sim: Simulation, overlay: str = "none") -> np.ndarray:
             continue
         # empty lots are drawn pale; built-up levels get progressively darker
         img[m] = np.clip(np.array(c) * (1.2 - 0.15 * w.level[m])[:, None], 0, 255)
-        img[m & (w.level == 0)] = np.array(c) * 0.5 + np.array(GROUND) * 0.5
-    img[w.water] = WATER
+        img[m & (w.level == 0)] = np.array(c) * 0.5 + ground[m & (w.level == 0)] * 0.5
     img[w.road] = ROAD
     if overlay != "none":
         field = {

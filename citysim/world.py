@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import random
 from enum import IntEnum
 
 import numpy as np
+
+from . import terrain
 
 
 class Zone(IntEnum):
@@ -21,12 +24,14 @@ MAX_LEVEL = 3
 class World:
     def __init__(self, width: int = 80, height: int = 60, seed: int | None = None):
         self.width, self.height = width, height
+        self.seed = seed if seed is not None else random.randrange(10_000)
+        self.biome = np.full((height, width), terrain.PLAINS, dtype=np.int8)
         self.water = np.zeros((height, width), dtype=bool)
         self.road = np.zeros((height, width), dtype=bool)
         self.zone = np.zeros((height, width), dtype=np.int8)
         self.level = np.zeros((height, width), dtype=np.int8)  # 0 = empty lot
         self.tick = 0
-        self.rng = np.random.default_rng(seed)
+        self.rng = np.random.default_rng(self.seed)
 
     def in_bounds(self, x: int, y: int) -> bool:
         return 0 <= x < self.width and 0 <= y < self.height
@@ -42,7 +47,8 @@ class World:
         return True
 
     def set_zone(self, x: int, y: int, zone: Zone) -> bool:
-        if not self.in_bounds(x, y) or self.water[y, x] or self.road[y, x]:
+        if (not self.in_bounds(x, y) or self.water[y, x] or self.road[y, x]
+                or self.biome[y, x] == terrain.MOUNTAINS):
             return False
         if self.zone[y, x] != zone:
             self.zone[y, x] = zone
@@ -87,20 +93,13 @@ class World:
 
     # --- terrain -----------------------------------------------------------
     def generate_terrain(self) -> None:
-        """A meandering river plus a lake, so there is something to design around."""
-        h, w = self.height, self.width
-        self.water[:] = False
-        x = w * self.rng.uniform(0.3, 0.7)
-        half = max(1, w // 80)
-        for y in range(h):
-            x += self.rng.normal(0, 1.2)
-            x = float(np.clip(x, half + 4, w - half - 5))
-            self.water[y, int(x) - half : int(x) + half + 1] = True
-        r = int(self.rng.integers(max(3, h // 14), max(4, h // 8)))
-        cx = int(self.rng.integers(r + 2, max(r + 3, w - r - 2)))
-        cy = int(self.rng.integers(r + 2, max(r + 3, h - r - 2)))
-        yy, xx = np.ogrid[:h, :w]
-        self.water |= (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+        """Fill the map from the seeded noise generator (see terrain.py)."""
+        self.set_biomes(np.array(terrain.generate_biome_map(self.width, self.height, self.seed),
+                                 dtype=np.int8))
+
+    def set_biomes(self, biome: np.ndarray) -> None:
+        self.biome = biome
+        self.water = biome <= terrain.SHALLOW_WATER
 
     # --- queries -----------------------------------------------------------
     def neighbors4(self, x: int, y: int):
@@ -117,7 +116,7 @@ class World:
     def save(self, path: str) -> None:
         data = {
             "width": self.width, "height": self.height, "tick": self.tick,
-            "water": self.water.astype(int).tolist(),
+            "seed": self.seed, "biome": self.biome.tolist(),
             "road": self.road.astype(int).tolist(),
             "zone": self.zone.tolist(), "level": self.level.tolist(),
         }
@@ -130,7 +129,12 @@ class World:
             d = json.load(f)
         w = cls(d["width"], d["height"])
         w.tick = d["tick"]
-        w.water = np.array(d["water"], dtype=bool)
+        w.seed = d.get("seed", w.seed)
+        if "biome" in d:
+            w.set_biomes(np.array(d["biome"], dtype=np.int8))
+        else:  # older saves only stored water
+            w.set_biomes(np.where(np.array(d["water"], dtype=bool),
+                                  terrain.SHALLOW_WATER, terrain.PLAINS).astype(np.int8))
         w.road = np.array(d["road"], dtype=bool)
         w.zone = np.array(d["zone"], dtype=np.int8)
         w.level = np.array(d["level"], dtype=np.int8)

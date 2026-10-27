@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pygame
 
-from .render import OVERLAYS, render
+from .render import OVERLAYS, tile_colors
 from .sim import Simulation
 from .world import World, Zone
 
@@ -29,6 +29,9 @@ def run(world: World, path: str = "city.json", tile: int = 12) -> None:
     hud_h = 62
     screen = pygame.display.set_mode((world.width * tile, world.height * tile + hud_h))
     pygame.display.set_caption("citysim")
+    # draw 1 pixel per cell, then nearest-neighbour upscale: crisp chunky pixel art
+    internal = pygame.Surface((world.width, world.height))
+    map_size = (world.width * tile, world.height * tile)
     font = pygame.font.SysFont("monospace", 14)
     clock = pygame.time.Clock()
     tool, tool_name, overlay, speed_i, acc = "road", "Road", "none", 2, 0.0
@@ -90,9 +93,11 @@ def run(world: World, path: str = "city.json", tile: int = 12) -> None:
             while acc >= 1:
                 sim.step()
                 acc -= 1
-        surf = pygame.surfarray.make_surface(render(sim, overlay, tile).swapaxes(0, 1))
+        if internal.get_size() != (world.width, world.height):
+            internal = pygame.Surface((world.width, world.height))
+        pygame.surfarray.blit_array(internal, tile_colors(sim, overlay).swapaxes(0, 1))
         screen.fill((25, 25, 28))
-        screen.blit(surf, (0, 0))
+        pygame.transform.scale(internal, map_size, screen.subsurface((0, 0, *map_size)))
         if painting and tool != "road" and start:
             cur = cell_at(pygame.mouse.get_pos()) or start
             x0, x1 = sorted((start[0], cur[0]))

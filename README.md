@@ -38,6 +38,18 @@ Don't run `citysim/app.py` directly; it is part of a package and uses relative i
 | `S` / `L` | Save / load `city.json` |
 | `Esc` | Quit |
 
+## Terrain
+
+`citysim/terrain.py` is a pure-Python generator (no numpy or other imports): two separate seedable fractal
+noise fields (elevation and moisture) feed a strict biome matrix of deep water, shallow water, sand, plains,
+forest, hills and mountains. Noise is low-frequency with low persistence (0.45) for wide, flat, buildable land;
+moisture is only consulted on the plains, so forests form their own masses instead of rings around mountains.
+Mountains can't be zoned; roads can bridge water. The seed is stored in saves, and `--seed N` reproduces a map.
+
+To look at terrain on its own (pygame only, no numpy): `python3 terrain_demo.py [seed]`. It draws 1 pixel per
+cell on a small internal surface and upscales it with `pygame.transform.scale` (see `SCALE` in that file); the
+main app uses the same pipeline.
+
 ## Scale
 
 A chunky pixel-art tile map (default 80x60 tiles). Roads are 1 tile wide; zones are rectangles you
@@ -59,4 +71,6 @@ This is a sandbox for leisurely city building: no money, demand, goals or disast
 - `citysim/sim.py`: simulation rules
 - `citysim/render.py`: rasterises the map (used by the window and PNG export)
 - `citysim/app.py`: pygame interface
+- `citysim/terrain.py`: seedable noise and biome generation (pure Python)
+- `terrain_demo.py`: standalone terrain viewer
 - `citysim/demo.py`: example starter city
