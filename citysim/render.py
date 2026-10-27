@@ -35,7 +35,7 @@ def tile_colors(sim: Simulation, overlay: str = "none") -> np.ndarray:
             img[m] = c
             continue
         # empty lots are drawn pale; built-up levels get progressively darker
-        img[m] = np.clip(np.array(c) * (1.3 - 0.3 * w.level[m])[:, None], 0, 255)
+        img[m] = np.clip(np.array(c) * (1.2 - 0.15 * w.level[m])[:, None], 0, 255)
         img[m & (w.level == 0)] = np.array(c) * 0.5 + np.array(GROUND) * 0.5
     img[w.water] = WATER
     img[w.road] = ROAD
@@ -51,7 +51,7 @@ def tile_colors(sim: Simulation, overlay: str = "none") -> np.ndarray:
     return img.astype(np.uint8)
 
 
-def render(sim: Simulation, overlay: str = "none", tile: int = 6, grid: bool = True) -> np.ndarray:
+def render(sim: Simulation, overlay: str = "none", tile: int = 10, grid: bool = True) -> np.ndarray:
     px = np.kron(tile_colors(sim, overlay), np.ones((tile, tile, 1), dtype=np.uint8))
     if grid and tile >= 8:
         px[::tile] = (px[::tile] * 0.85).astype(np.uint8)

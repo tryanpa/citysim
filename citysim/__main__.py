@@ -7,14 +7,14 @@ from .world import World
 
 def main() -> None:
     p = argparse.ArgumentParser(prog="citysim", description="Gameplay-free city sandbox")
-    p.add_argument("--size", type=int, nargs=2, default=(160, 110), metavar=("W", "H"))
+    p.add_argument("--size", type=int, nargs=2, default=(80, 60), metavar=("W", "H"))
     p.add_argument("--seed", type=int)
     p.add_argument("--load", help="load a saved city (json)")
     p.add_argument("--demo", action="store_true", help="start with an example street grid")
     p.add_argument("--png", help="run headless, write a PNG snapshot and exit")
     p.add_argument("--ticks", type=int, default=300, help="ticks to simulate with --png")
     p.add_argument("--overlay", default="none")
-    p.add_argument("--tile", type=int, default=6, help="pixels per cell")
+    p.add_argument("--tile", type=int, default=12, help="pixels per cell")
     a = p.parse_args()
 
     world = World.load(a.load) if a.load else World(*a.size, seed=a.seed)

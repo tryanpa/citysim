@@ -1,10 +1,11 @@
 """Simulation rules: pollution, land value, road traffic and building growth.
 
-Scale: one cell is roughly 10 m, so a road is 1 cell wide and a city block /
-zone is typically around 10x10 cells. Buildings grow in 2x2 lots.
+One cell is one chunky tile: a road is 1 tile wide and zones are blocks of
+tiles you drag out (think 3x3 or 4x4, like classic SimCity).
 
-There is deliberately no money, score or goals: the sim only reacts to how
-the city is laid out, and exposes the results as overlay maps.
+There is deliberately no money, score, demand or disasters. Zoned land simply
+fills in over time, and the sim exposes how the layout affects traffic,
+pollution and land value as overlay maps.
 """
 from __future__ import annotations
 
@@ -14,12 +15,12 @@ import numpy as np
 
 from .world import MAX_LEVEL, World, Zone
 
-HOME_PER_LEVEL = 2.0     # residents per cell per level
-JOB_COMMERCIAL = 1.0     # jobs per cell per level
-JOB_INDUSTRIAL = 1.5
-ROAD_REACH = 5           # a lot can use a road up to this many cells away
-ROAD_CAPACITY = 300.0    # commuters per road cell before it counts as congested
-LOT = 2                  # buildings grow in LOT x LOT lots
+HOME_PER_LEVEL = 5.0     # residents per tile per level
+JOB_COMMERCIAL = 3.0     # jobs per tile per level
+JOB_INDUSTRIAL = 4.0
+ROAD_REACH = 3           # a tile can use a road up to this many tiles away
+ROAD_CAPACITY = 60.0     # commuters per road tile before it counts as congested
+LOT = 1                  # buildings grow in LOT x LOT lots
 
 
 def box_blur(a: np.ndarray, r: int, passes: int = 2) -> np.ndarray:
@@ -124,12 +125,12 @@ class Simulation:
         homes = np.where(w.zone == Zone.RESIDENTIAL, lvl, 0)
         parks = (w.zone == Zone.PARK).astype(float)
 
-        road_smog = box_blur(self.traffic / ROAD_CAPACITY, 3) * 0.8
+        road_smog = box_blur(self.traffic / ROAD_CAPACITY, 1) * 0.8
         self.pollution = np.clip(
-            box_blur(industry, 5) * 0.5 + road_smog - box_blur(parks, 4) * 0.5, 0, 1)
+            box_blur(industry, 2) * 0.6 + road_smog - box_blur(parks, 2) * 0.6, 0, 1)
         self.land_value = np.clip(
-            0.35 + box_blur(parks, 5) * 0.6 + box_blur(commerce, 5) * 0.15
-            + box_blur(homes, 5) * 0.05 + box_blur(w.water.astype(float), 5) * 0.3
+            0.35 + box_blur(parks, 2) * 0.7 + box_blur(commerce, 2) * 0.2
+            + box_blur(homes, 2) * 0.05 + box_blur(w.water.astype(float), 2) * 0.3
             - self.pollution * 0.9, 0, 1)
 
     # --- growth --------------------------------------------------------------
@@ -140,38 +141,27 @@ class Simulation:
         return np.kron(r, np.ones((LOT, LOT)))[: w.height, : w.width]
 
     def _update_growth(self) -> None:
+        """Zoned tiles with road access slowly fill in; there is no demand to satisfy."""
         w = self.world
         has_entry = self.entry >= 0
         lvl = w.level
-        pop = float(np.where(w.zone == Zone.RESIDENTIAL, lvl, 0).sum() * HOME_PER_LEVEL)
-        jobs_c = float(np.where(w.zone == Zone.COMMERCIAL, lvl, 0).sum() * JOB_COMMERCIAL)
-        jobs_i = float(np.where(w.zone == Zone.INDUSTRIAL, lvl, 0).sum() * JOB_INDUSTRIAL)
-        # each sector wants the others to exist; start-up bias lets the first lots appear
-        demand = {
-            Zone.RESIDENTIAL: np.clip(((jobs_c + jobs_i) * 1.1 + 60 - pop) / 200, -1, 1),
-            Zone.COMMERCIAL: np.clip((pop * 0.55 + 20 - jobs_c) / 100, -1, 1),
-            Zone.INDUSTRIAL: np.clip((pop * 0.55 + 20 - jobs_i) / 100, -1, 1),
-        }
-        congestion = np.clip(box_blur(self.traffic / ROAD_CAPACITY, 3) * 3, 0, 1)
+        congestion = np.clip(box_blur(self.traffic / ROAD_CAPACITY, 1) * 3, 0, 1)
         d = np.full(self.land_value.shape, np.nan)
-        for zone, dem in demand.items():
+        for zone in (Zone.RESIDENTIAL, Zone.COMMERCIAL, Zone.INDUSTRIAL):
             m = w.zone == zone
-            if zone == Zone.INDUSTRIAL:  # industry doesn't mind pollution, dislikes expensive land
-                score = 0.4 + dem * 0.6 - self.land_value * 0.3 - congestion * 0.3
+            if zone == Zone.INDUSTRIAL:  # industry doesn't mind pollution or traffic
+                score = 0.7 - self.land_value * 0.2
             elif zone == Zone.RESIDENTIAL:
-                score = self.land_value * 0.7 + dem * 0.5 - self.pollution * 0.4 - congestion * 0.3
+                score = 0.3 + self.land_value * 0.7 - self.pollution * 0.5 - congestion * 0.3
             else:
-                score = self.land_value * 0.4 + dem * 0.5 - congestion * 0.2
+                score = 0.3 + self.land_value * 0.5 - congestion * 0.2
             d[m] = score[m]
         self.desirability = d
 
-        buildable = has_entry & ~np.isnan(d)
-        if jobs_c + jobs_i > 0:  # homes only grow where commuters can reach a job
-            buildable &= (w.zone != Zone.RESIDENTIAL) | self.job_access
         roll = self._lot_roll()
-        grow = buildable & (d > 0.3) & (roll < 0.15) & (lvl < MAX_LEVEL)
+        grow = has_entry & ~np.isnan(d) & (d > 0.3) & (roll < 0.1) & (lvl < MAX_LEVEL)
         built = (w.zone > 0) & (w.zone != Zone.PARK) & (lvl > 0)
-        shrink = built & (~has_entry | (np.nan_to_num(d, nan=1) < 0.05)) & (roll < 0.08)
+        shrink = built & ~has_entry & (roll < 0.1)  # only if its road was removed
         w.level[grow] += 1
         w.level[shrink] -= 1
 

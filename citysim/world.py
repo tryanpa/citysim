@@ -19,7 +19,7 @@ MAX_LEVEL = 3
 
 
 class World:
-    def __init__(self, width: int = 160, height: int = 110, seed: int | None = None):
+    def __init__(self, width: int = 80, height: int = 60, seed: int | None = None):
         self.width, self.height = width, height
         self.water = np.zeros((height, width), dtype=bool)
         self.road = np.zeros((height, width), dtype=bool)
@@ -91,7 +91,7 @@ class World:
         h, w = self.height, self.width
         self.water[:] = False
         x = w * self.rng.uniform(0.3, 0.7)
-        half = max(1, w // 40)
+        half = max(1, w // 80)
         for y in range(h):
             x += self.rng.normal(0, 1.2)
             x = float(np.clip(x, half + 4, w - half - 5))

@@ -22,7 +22,7 @@ def apply_rect(world: World, tool, a: tuple[int, int], b: tuple[int, int]) -> No
         world.set_zone_rect(*a, *b, tool)
 
 
-def run(world: World, path: str = "city.json", tile: int = 6) -> None:
+def run(world: World, path: str = "city.json", tile: int = 12) -> None:
     pygame.init()
     sim = Simulation(world)
     sim.step()
@@ -106,7 +106,7 @@ def run(world: World, path: str = "city.json", tile: int = 6) -> None:
             f"tool: {tool_name}   overlay: {overlay}   speed: {SPEEDS[speed_i]}x   tick {world.tick}",
             f"pop {s.get('population', 0)}  jobs {s.get('jobs', 0)}  unserved {int(s.get('unserved', 0))}"
             f"  | 1 road (drag)  2-6 zones/bulldoze (drag a rectangle)",
-            "O overlay  SPACE pause  +/- speed  . step  S save  L load   (1 cell = 10 m)",
+            "O overlay  SPACE pause  +/- speed  . step  S save  L load",
         ]
         for i, t in enumerate(lines):
             screen.blit(font.render(t, True, (230, 230, 230)), (6, world.height * tile + 4 + i * 18))
